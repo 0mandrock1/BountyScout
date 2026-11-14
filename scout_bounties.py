@@ -56,29 +56,86 @@ def search_github(query, token=None):
         print(f"GitHub Search API Error for query '{query}': {e}")
         return {}
 
+OWNER_DENY = {"zhangjiayang6835-cyber"}
+MAX_AGE_DAYS = 90
+
+JUNK_RE = re.compile(
+    r"\b(?:not external real bounty|reward_policy|积分|赏金|coins?|"
+    r"lock.{0,40}/claim|/claim.{0,40}lock|airdrop|referral|casino|gambling|"
+    r"trading bot|blog post|article writing|content creator|giveaway|"
+    r"whitelist|presale)\b"
+    r"|积分|赏金",
+    re.IGNORECASE | re.DOTALL,
+)
+OFFPLATFORM_RE = re.compile(
+    r"\b(?:dm me|private (?:channel|message)|telegram|whatsapp)\b|discord\.gg|t\.me/",
+    re.IGNORECASE,
+)
+REWARD_RE = re.compile(
+    r"\$\s?\d{2,}|\b\d{2,}(?:[.,]\d+)?\s?(?:usd|usdc|usdt|eur|dai)\b",
+    re.IGNORECASE,
+)
+TRUSTED_RE = re.compile(
+    r"algora\.io|opire\.dev|issuehunt|bountysource|gitcoin|polar\.sh|\b(?:opire|algora)\b",
+    re.IGNORECASE,
+)
+
+def _repo_owner(item):
+    repo_url = str(item.get("repository_url", ""))
+    if "/repos/" not in repo_url:
+        return ""
+    return repo_url.split("/repos/", 1)[1].split("/")[0].lower()
+
+def _is_fresh(item):
+    try:
+        ts = datetime.fromisoformat(str(item["updated_at"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError, TypeError):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).days <= MAX_AGE_DAYS
+
 def is_clean_candidate(item):
-    """Triage logic to filter out noisy, assigned, closed, or spam tasks."""
-    # 1. Skip if already a Pull Request
+    """Strict triage: reject noisy/assigned/bot/self-owned/off-platform items,
+    require a stated reward, a trusted bounty platform and recent activity."""
     if "pull_request" in item:
         return False
-    # 2. Skip if already assigned
-    if item.get("assignees"):
+    if item.get("assignees") or item.get("assignee"):
         return False
-    # 3. Skip if thread is overcrowded (highly competitive)
-    if int(item.get("comments", 0)) > MAX_COMMENTS:
+    try:
+        if int(item.get("comments", 0)) > MAX_COMMENTS:
+            return False
+    except (TypeError, ValueError):
         return False
-    
-    title = str(item.get("title", "")).lower()
-    body = str(item.get("body", "")).lower()
-    
-    # 4. Skip cryptocurrency/article writing/spam keywords
-    blocklist = [
-        "airdrop", "referral", "casino", "gambling", "trading bot", 
-        "blog post", "article writing", "tutorial proposal", "content creator"
-    ]
-    if any(term in title or term in body for term in blocklist):
+
+    user = item.get("user") or {}
+    login = str(user.get("login", ""))
+    if user.get("type") == "Bot" or login.lower().endswith("[bot]"):
         return False
-        
+
+    title = str(item.get("title") or "")
+    if title.strip().lower().startswith(("bounty alert", "🎯 bounty alert")):
+        return False
+
+    if _repo_owner(item) in OWNER_DENY or login.lower() in OWNER_DENY:
+        return False
+
+    labels = " ".join(
+        str(l.get("name", "")) if isinstance(l, dict) else str(l)
+        for l in (item.get("labels") or [])
+    )
+    text = f"{title}\n{item.get('body') or ''}\n{labels}"
+
+    if JUNK_RE.search(text):
+        return False
+    if OFFPLATFORM_RE.search(text):
+        return False
+    if not REWARD_RE.search(text):
+        return False
+    if not TRUSTED_RE.search(text):
+        return False
+    if not _is_fresh(item):
+        return False
     return True
 
 def send_telegram_notification(token, chat_id, message):
