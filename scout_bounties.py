@@ -147,6 +147,15 @@ def is_clean_candidate(item):
         return False
     return True
 
+def escape_tg(text):
+    """Escape legacy Telegram Markdown specials (_ * ` [) with a backslash."""
+    return re.sub(r"([_*`\[])", r"\\\1", str(text))
+
+def escape_gh(text):
+    """Backslash-escape GitHub Markdown specials; also neutralise @mentions and HTML."""
+    text = re.sub(r"([\\`*_{}\[\]()<>#+\-=|~!.>])", r"\\\1", str(text))
+    return text.replace("@", "@\u200b")
+
 def send_telegram_notification(token, chat_id, message):
     """Send a notification message via Telegram Bot API."""
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -229,6 +238,7 @@ def main():
 
     seen_urls = load_seen_bounties()
     new_bounties = []
+    queued_urls = set()
 
     # Run scouting queries
     print("Scouting GitHub for active bounties...")
@@ -236,8 +246,9 @@ def main():
         results = search_github(query, github_token)
         for item in results.get("items", []):
             url = item.get("html_url")
-            if url and url not in seen_urls:
+            if url and url not in seen_urls and url not in queued_urls:
                 if is_clean_candidate(item):
+                    queued_urls.add(url)
                     new_bounties.append({
                         "title": item.get("title"),
                         "url": url,
@@ -261,8 +272,8 @@ def main():
         f"Found {len(new_bounties)} new opportunity{'ies' if len(new_bounties) > 1 else ''}:\n"
     ]
     for idx, b in enumerate(new_bounties, start=1):
-        notif_lines.append(f"{idx}. *{b['title']}*")
-        notif_lines.append(f"   • Repository: `{b['repo']}`")
+        notif_lines.append(f"{idx}. *{escape_tg(b['title'])}*")
+        notif_lines.append(f"   • Repository: `{b['repo'].replace('`', '')}`")
         notif_lines.append(f"   • Comments: {b['comments']}")
         notif_lines.append(f"   • Link: {b['url']}\n")
     
@@ -290,8 +301,8 @@ def main():
         )
         for idx, b in enumerate(new_bounties, start=1):
             issue_body += (
-                f"#### {idx}. [{b['title']}]({b['url']})\n"
-                f"- **Repository:** [{b['repo']}](https://github.com/{b['repo']})\n"
+                f"#### {idx}. [{escape_gh(b['title'])}]({b['url']})\n"
+                f"- **Repository:** [{escape_gh(b['repo'])}](https://github.com/{b['repo']})\n"
                 f"- **Comments:** {b['comments']}\n"
                 f"- **Last Updated:** {b['updated_at']}\n\n"
             )
